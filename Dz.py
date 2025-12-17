@@ -2,14 +2,8 @@ import sys
 import re
 import yaml
 
-
-
-
 class ConfigSyntaxError(Exception):
     pass
-
-
-# ЛЕКСИЧЕСКИЙ АНАЛИЗ (разбиение на токены)
 
 # Описание токенов
 TOKENS = [
@@ -44,7 +38,6 @@ def tokenize(text):
         yield token_type, token_value
 
     yield "EOF", ""
-
 
 
 
@@ -221,3 +214,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
