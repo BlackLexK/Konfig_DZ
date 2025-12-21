@@ -1,6 +1,6 @@
 from lark import Lark, Transformer, v_args
 from lark.exceptions import VisitError
-import yaml  # <-- добавляем для красивого вывода
+import yaml 
 
 GRAMMAR = r"""
 start: stmt*
@@ -103,6 +103,7 @@ def parse_config(text: str):
 
 if __name__ == "__main__":
     import sys
-    config_text = sys.stdin.read()  # читаем весь текст из stdin
+    config_text = sys.stdin.read()  
     result = parse_config(config_text)
-    print(yaml.dump(result, sort_keys=False))  # выводим красиво в YAML
+    print(yaml.dump(result, sort_keys=False))  
+
