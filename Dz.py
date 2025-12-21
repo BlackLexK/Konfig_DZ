@@ -1,188 +1,81 @@
-import sys
-import re
-import yaml
+from lark import Lark, Transformer, v_args
+from lark.exceptions import VisitError
+import yaml  # <-- добавляем для красивого вывода
 
-class ConfigSyntaxError(Exception):
+GRAMMAR = r"""
+start: stmt*
+
+stmt: NAME "=" expr ";"?
+
+?expr: NUMBER        -> number
+     | NAME          -> var
+     | array
+     | dict
+     | operation
+
+array: "(" [expr ("," expr)*] ")"
+
+dict: "@{" stmt* "}"
+
+operation: "$" OP expr expr "$"
+         | "$sort" expr "$"
+
+OP: "+" | "-" | "*" | "/"
+
+%import common.CNAME -> NAME
+%import common.SIGNED_NUMBER -> NUMBER
+%import common.WS
+%ignore WS
+"""
+
+
+class ConfigError(Exception):
     pass
 
-# Описание токенов
-TOKENS = [
-    ("NUMBER",  r"[+-]?\d+\.\d+"),   
-    ("NAME",    r"[_a-zA-Z]+"),      
-    ("LPAREN",  r"\("),             
-    ("RPAREN",  r"\)"),             
-    ("LBRACE",  r"\@\{"),            
-    ("RBRACE",  r"\}"),             
-    ("COMMA",   r","),               
-    ("SEMI",    r";"),              
-    ("EQUAL",   r"="),              
-    ("DOLLAR",  r"\$"),             
-    ("OP",      r"[+\-*/]"),        
-    ("SKIP",    r"[ \t\n]+"),         
-]
 
-# Общая регулярка 
-TOKEN_REGEX = re.compile(
-    "|".join(f"(?P<{name}>{regex})" for name, regex in TOKENS)
-)
+@v_args(inline=True)
+class EvalTransformer(Transformer):
+    def __init__(self):
+        self.consts = {}
 
+    def start(self, *stmts):
+        return self.consts
 
-def tokenize(text):
-    for match in TOKEN_REGEX.finditer(text):
-        token_type = match.lastgroup
-        token_value = match.group()
-
-        if token_type == "SKIP":
-            continue
-
-        yield token_type, token_value
-
-    yield "EOF", ""
-
-
-
-class Parser:
-    def __init__(self, tokens):
-        self.tokens = list(tokens)
-        self.position = 0
-        self.constants = {}  
-
-    
-    def current(self):
-        return self.tokens[self.position]
-
-    def consume(self, expected_type):
-        token_type, token_value = self.current()
-
-        if token_type != expected_type:
-            raise ConfigSyntaxError(
-                f"Ожидался {expected_type}, получено {token_type}"
-            )
-
-        self.position += 1
-        return token_value
-
-
-    
-    def parse(self):
-        result = {}
-
-        while self.current()[0] != "EOF":
-            name, value = self.parse_assignment()
-            result[name] = value
-            self.constants[name] = value
-
-        return result
-
-
-    # имя = значение;
-
-    def parse_assignment(self):
-        name = self.consume("NAME")
-        self.consume("EQUAL")
-        value = self.parse_value()
-        self.consume("SEMI")
+    def stmt(self, name, value):
+        name = str(name)
+        self.consts[name] = value
         return name, value
 
+    def number(self, token):
+        return float(token)
 
-    # Разбор значения
+    def var(self, name):
+        name = str(name)
+        if name not in self.consts:
+            raise ConfigError(f"Неизвестная константа: {name}")
+        return self.consts[name]
 
-    def parse_value(self):
-        token_type, token_value = self.current()
+    def array(self, *items):
+        return list(items)
 
-        # Число
-        if token_type == "NUMBER":
-            self.consume("NUMBER")
-            return float(token_value)
-
-        # Использование константы
-        if token_type == "NAME":
-            self.consume("NAME")
-            if token_value not in self.constants:
-                raise ConfigSyntaxError(
-                    f"Неизвестная константа: {token_value}"
-                )
-            return self.constants[token_value]
-
-        # Массив
-        if token_type == "LPAREN":
-            return self.parse_array()
-
-        # Словарь
-        if token_type == "LBRACE":
-            return self.parse_dict()
-
-        # Константное выражение
-        if token_type == "DOLLAR":
-            return self.parse_expression()
-
-        raise ConfigSyntaxError("Недопустимое значение")
-
-
-    # ( значение, значение, ... )
-
-    def parse_array(self):
-        self.consume("LPAREN")
-        items = []
-
-        if self.current()[0] != "RPAREN":
-            items.append(self.parse_value())
-
-            while self.current()[0] == "COMMA":
-                self.consume("COMMA")
-                items.append(self.parse_value())
-
-        self.consume("RPAREN")
-        return items
-
-
-    # @{ имя = значение; ... }
-
-    def parse_dict(self):
-        self.consume("LBRACE")
+    def dict(self, *stmts):
         result = {}
-
-        while self.current()[0] != "RBRACE":
-            key = self.consume("NAME")
-            self.consume("EQUAL")
-            value = self.parse_value()
-            self.consume("SEMI")
-            result[key] = value
-
-        self.consume("RBRACE")
+        for k, v in stmts:
+            result[k] = v
         return result
 
-    # $ + a b $
-    # $ sort arr $
-  
-    def parse_expression(self):
-        self.consume("DOLLAR")
-
-        token_type, token_value = self.current()
-
-        # Арифметическая операция
-        if token_type == "OP":
-            op = self.consume("OP")
-            left = self.parse_value()
-            right = self.parse_value()
-            self.consume("DOLLAR")
-            return self.calculate(op, left, right)
-
-        # Функция sort
-        if token_type == "NAME" and token_value == "sort":
-            self.consume("NAME")
-            value = self.parse_value()
-
+    def operation(self, *args):
+        # $sort expr$
+        if len(args) == 1:
+            value = args[0]
             if not isinstance(value, list):
-                raise ConfigSyntaxError("sort применяется только к массиву")
-
-            self.consume("DOLLAR")
+                raise ConfigError("sort применяется только к массивам")
             return sorted(value)
 
-        raise ConfigSyntaxError("Неверное константное выражение")
+        # $op a b$
+        op, a, b = args
+        op = str(op)
 
-    # Вычисление операций
-    def calculate(self, op, a, b):
         if op == "+":
             return a + b
         if op == "-":
@@ -190,28 +83,26 @@ class Parser:
         if op == "*":
             return a * b
         if op == "/":
+            if b == 0:
+                raise ConfigError("Деление на ноль")
             return a / b
 
-        raise ConfigSyntaxError(f"Неизвестная операция {op}")
+        raise ConfigError(f"Неизвестная операция: {op}")
 
 
-
-def main():
-    input_text = sys.stdin.read()
-
+def parse_config(text: str):
+    parser = Lark(GRAMMAR, start="start", parser="lalr")
     try:
-        tokens = tokenize(input_text)
-        parser = Parser(tokens)
-        data = parser.parse()
-
-        # Вывод YAML
-        print(yaml.dump(data, allow_unicode=True))
-
-    except ConfigSyntaxError as error:
-        print(f"Синтаксическая ошибка: {error}", file=sys.stderr)
-        sys.exit(1)
+        tree = parser.parse(text)
+        return EvalTransformer().transform(tree)
+    except VisitError as e:
+        if isinstance(e.orig_exc, ConfigError):
+            raise e.orig_exc
+        raise
 
 
 if __name__ == "__main__":
-    main()
-
+    import sys
+    config_text = sys.stdin.read()  # читаем весь текст из stdin
+    result = parse_config(config_text)
+    print(yaml.dump(result, sort_keys=False))  # выводим красиво в YAML
